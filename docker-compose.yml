@@ -1,0 +1,115 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database Service
+  postgres:
+    image: postgres:15-alpine
+    container_name: prestige_postgres
+    environment:
+      POSTGRES_DB: nfl_analytics
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d nfl_analytics"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - prestige_network
+    restart: unless-stopped
+
+  # RabbitMQ Message Queue Service
+  rabbitmq:
+    image: rabbitmq:3.12-management
+    container_name: prestige_rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    ports:
+      - "5672:5672"      # AMQP port
+      - "15672:15672"    # Management UI port
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - prestige_network
+    restart: unless-stopped
+
+  # NFL Data Ingestor Service
+  nfl_ingestor:
+    build:
+      context: ./nfl_ingestor
+      dockerfile: Dockerfile
+    container_name: prestige_ingestor
+    environment:
+      # RabbitMQ Configuration
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=guest
+      - RABBITMQ_PASS=guest
+      - RABBITMQ_QUEUE=game_events
+      
+      # Service Configuration
+      - INGESTOR_INTERVAL=5
+      - NFL_DATA_FILE=/app/data/nfl_basic.csv
+      - LOG_LEVEL=INFO
+      - ENVIRONMENT=development
+    volumes:
+      - ./data:/app/data:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - prestige_network
+    restart: unless-stopped
+
+  # NFL Data Processor Service
+  nfl_processor:
+    build:
+      context: ./nfl_processor
+      dockerfile: Dockerfile
+    container_name: prestige_processor
+    environment:
+      # RabbitMQ Configuration
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=guest
+      - RABBITMQ_PASS=guest
+      - RABBITMQ_QUEUE=game_events
+      
+      # Database Configuration
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=nfl_analytics
+      - DB_USER=postgres
+      - DB_PASS=password
+      
+      # Service Configuration
+      - LOG_LEVEL=INFO
+      - ENVIRONMENT=development
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - prestige_network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  rabbitmq_data:
+
+networks:
+  prestige_network:
+    driver: bridge
